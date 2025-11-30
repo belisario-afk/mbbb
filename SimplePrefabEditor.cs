@@ -8,8 +8,8 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Simple Prefab Editor", "belisario-afk", "7.0.0")]
-    [Description("Spawn, select and live-edit prefab entities with mystery boxes, templates, SignArtist images, rigid group editing, and a Black Ops style Mystery Box with ImageLibrary GUI reel, cascading gun drops, proximity-buy UI, and auto-registration of medieval large wood boxes.")]
+    [Info("Simple Prefab Editor", "belisario-afk", "8.0.0")]
+    [Description("Spawn, select and live-edit prefab entities with mystery boxes, templates, SignArtist images, rigid group editing, and a Black Ops style Mystery Box with ImageLibrary GUI reel, cascading gun drops, proximity-buy UI, auto-registration of medieval large wood boxes, spawn point saving, 10-minute respawn timer, and 2-minute active duration.")]
     public class SimplePrefabEditor : RustPlugin
     {
         private const string PermissionUse = "simpleprefabeditor.use";
@@ -85,6 +85,17 @@ namespace Oxide.Plugins
             public Vector3 DisplayOffset = new Vector3(0f, 1.2f, 0f);
         }
 
+        /// <summary>
+        /// Saved spawn point for Mystery Box - persists across server restarts
+        /// </summary>
+        private class MysteryBoxSpawnPoint
+        {
+            public Vector3 Position;
+            public Quaternion Rotation;
+            public bool IsActive;           // Whether a box is currently spawned here
+            public float LastSpawnTime;     // Server time when last spawned
+        }
+
         private class BoxSaveData
         {
             public Dictionary<ulong, Dictionary<string, List<ulong>>> PlayerBoxes =
@@ -95,6 +106,9 @@ namespace Oxide.Plugins
 
             public Dictionary<uint, MysteryBoxDef> MysteryBoxes =
                 new Dictionary<uint, MysteryBoxDef>();
+
+            // Saved spawn points for Mystery Boxes - these persist and respawn every 10 minutes
+            public List<MysteryBoxSpawnPoint> SpawnPoints = new List<MysteryBoxSpawnPoint>();
         }
 
         private class SavedEntity
@@ -114,6 +128,11 @@ namespace Oxide.Plugins
             public ulong ResultDropNetId;    // net ID of spawned drop for this roll
 
             public HashSet<ulong> ActivePlayers = new HashSet<ulong>();
+
+            // Deactivation timer state
+            public float SpawnTime;          // When this box was spawned
+            public Timer DeactivationTimer;  // Timer to despawn after 2 minutes
+            public int SpawnPointIndex;      // Which spawn point this box belongs to (-1 if manual)
         }
 
         #endregion
@@ -148,8 +167,17 @@ namespace Oxide.Plugins
         // Proximity loop timer
         private Timer _mboxProximityTimer;
 
+        // Mystery Box spawn/deactivation timers
+        private const float MysteryBoxRespawnInterval = 600f;    // 10 minutes in seconds
+        private const float MysteryBoxActiveTime = 120f;         // 2 minutes active before deactivation
+        private Timer _mysteryBoxRespawnTimer;
+        private readonly Dictionary<int, BaseEntity> _spawnedBoxes = new Dictionary<int, BaseEntity>(); // SpawnPointIndex -> Entity
+
         // Track which box UI is visible for each player (only 1 box UI at a time per player)
         private readonly Dictionary<ulong, uint> _playerVisibleBox = new Dictionary<ulong, uint>();
+
+        // Track countdown UI for players
+        private readonly Dictionary<ulong, uint> _playerCountdownBox = new Dictionary<ulong, uint>();
 
         private class PluginConfig
         {
@@ -236,6 +264,12 @@ namespace Oxide.Plugins
             cmd.AddChatCommand("mbox_use", this, CmdMBoxUse);
             cmd.AddChatCommand("mbox_test", this, CmdMBoxTest);
             cmd.AddChatCommand("mbox_clearall", this, CmdMBoxClearAll);
+
+            // Spawn point management commands
+            cmd.AddChatCommand("mbox_addspawn", this, CmdMBoxAddSpawn);
+            cmd.AddChatCommand("mbox_removespawn", this, CmdMBoxRemoveSpawn);
+            cmd.AddChatCommand("mbox_listspawns", this, CmdMBoxListSpawns);
+            cmd.AddChatCommand("mbox_forcespawn", this, CmdMBoxForceSpawn);
         }
 
         private void OnServerInitialized()
@@ -246,6 +280,8 @@ namespace Oxide.Plugins
             InitGunImages();
             StartMysteryBoxProximityLoop();
             AutoRegisterMedievalBoxes();
+            StartMysteryBoxRespawnLoop();
+            SpawnAllMysteryBoxes(); // Spawn boxes at all saved spawn points on server start
         }
 
         /// <summary>
@@ -299,15 +335,28 @@ namespace Oxide.Plugins
 
                 DestroyMysteryGuiForPlayer(player);
                 DestroyBuyUi(player);
+                DestroyCountdownUi(player);
             }
 
             _mboxProximityTimer?.Destroy();
             _mboxProximityTimer = null;
 
+            _mysteryBoxRespawnTimer?.Destroy();
+            _mysteryBoxRespawnTimer = null;
+
+            // Destroy all deactivation timers
+            foreach (var rt in _mysteryRuntime.Values)
+            {
+                rt.DeactivationTimer?.Destroy();
+                rt.DeactivationTimer = null;
+            }
+
             SaveData();
             editing.Clear();
             _mysteryRuntime.Clear();
             _playerVisibleBox.Clear();
+            _playerCountdownBox.Clear();
+            _spawnedBoxes.Clear();
         }
 
         private void OnPlayerDisconnected(BasePlayer player, string reason)
@@ -316,6 +365,7 @@ namespace Oxide.Plugins
             CloseGui(player);
             DestroyMysteryGuiForPlayer(player);
             DestroyBuyUi(player);
+            DestroyCountdownUi(player);
 
             if (editing.TryGetValue(player.userID, out var state))
             {
@@ -324,6 +374,7 @@ namespace Oxide.Plugins
             }
 
             _playerVisibleBox.Remove(player.userID);
+            _playerCountdownBox.Remove(player.userID);
         }
 
         private void LoadData()
@@ -337,13 +388,16 @@ namespace Oxide.Plugins
                     _boxData.FullBoxTemplates = new Dictionary<string, FullBoxTemplate>(StringComparer.OrdinalIgnoreCase);
                 if (_boxData.MysteryBoxes == null)
                     _boxData.MysteryBoxes = new Dictionary<uint, MysteryBoxDef>();
+                if (_boxData.SpawnPoints == null)
+                    _boxData.SpawnPoints = new List<MysteryBoxSpawnPoint>();
             }
             catch
             {
                 _boxData = new BoxSaveData
                 {
                     FullBoxTemplates = new Dictionary<string, FullBoxTemplate>(StringComparer.OrdinalIgnoreCase),
-                    MysteryBoxes = new Dictionary<uint, MysteryBoxDef>()
+                    MysteryBoxes = new Dictionary<uint, MysteryBoxDef>(),
+                    SpawnPoints = new List<MysteryBoxSpawnPoint>()
                 };
             }
         }
@@ -1464,6 +1518,303 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Mystery Box Spawn Point Management
+
+        /// <summary>
+        /// Add a spawn point at the player's current position
+        /// </summary>
+        private void CmdMBoxAddSpawn(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            var spawnPoint = new MysteryBoxSpawnPoint
+            {
+                Position = player.transform.position,
+                Rotation = player.transform.rotation,
+                IsActive = false,
+                LastSpawnTime = 0f
+            };
+
+            _boxData.SpawnPoints.Add(spawnPoint);
+            SaveData();
+
+            int index = _boxData.SpawnPoints.Count - 1;
+            PrintToChat(player, $"<color=#00ff00>Added Mystery Box spawn point #{index}</color> at your position.\n" +
+                $"Position: {spawnPoint.Position}\n" +
+                $"Boxes will spawn here every 10 minutes and stay active for 2 minutes.");
+        }
+
+        /// <summary>
+        /// Remove a spawn point by index
+        /// </summary>
+        private void CmdMBoxRemoveSpawn(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            if (args == null || args.Length < 1)
+            {
+                PrintToChat(player, "<color=#ffcc00>Usage:</color> /mbox_removespawn <index>");
+                return;
+            }
+
+            if (_boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+            {
+                PrintToChat(player, "<color=#ff0000>No spawn points to remove.</color>");
+                return;
+            }
+
+            if (!int.TryParse(args[0], out int index) || index < 0 || index >= _boxData.SpawnPoints.Count)
+            {
+                PrintToChat(player, $"<color=#ff0000>Invalid spawn point index.</color> Valid range: 0 to {_boxData.SpawnPoints.Count - 1}");
+                return;
+            }
+
+            // Kill the box if one is spawned at this point
+            if (_spawnedBoxes.TryGetValue(index, out var entity))
+            {
+                if (entity != null && !entity.IsDestroyed)
+                    entity.Kill();
+                _spawnedBoxes.Remove(index);
+            }
+
+            _boxData.SpawnPoints.RemoveAt(index);
+            SaveData();
+
+            // Update indices in _spawnedBoxes dictionary
+            var updatedBoxes = new Dictionary<int, BaseEntity>();
+            foreach (var kv in _spawnedBoxes)
+            {
+                int newIndex = kv.Key > index ? kv.Key - 1 : kv.Key;
+                updatedBoxes[newIndex] = kv.Value;
+            }
+            _spawnedBoxes.Clear();
+            foreach (var kv in updatedBoxes)
+                _spawnedBoxes[kv.Key] = kv.Value;
+
+            PrintToChat(player, $"<color=#ff0000>Removed spawn point #{index}.</color>");
+        }
+
+        /// <summary>
+        /// List all spawn points
+        /// </summary>
+        private void CmdMBoxListSpawns(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            if (_boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+            {
+                PrintToChat(player, "<color=#ffcc00>No Mystery Box spawn points saved.</color>\nUse /mbox_addspawn to add one.");
+                return;
+            }
+
+            PrintToChat(player, "<color=#00ffff>=== Mystery Box Spawn Points ===</color>");
+            for (int i = 0; i < _boxData.SpawnPoints.Count; i++)
+            {
+                var sp = _boxData.SpawnPoints[i];
+                string status = sp.IsActive ? "<color=#00ff00>ACTIVE</color>" : "<color=#ff0000>INACTIVE</color>";
+                PrintToChat(player, $"#{i}: {sp.Position} - {status}");
+            }
+        }
+
+        /// <summary>
+        /// Force spawn boxes at all spawn points immediately
+        /// </summary>
+        private void CmdMBoxForceSpawn(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            SpawnAllMysteryBoxes();
+            PrintToChat(player, $"<color=#00ff00>Force spawned Mystery Boxes at all {_boxData.SpawnPoints.Count} spawn points.</color>");
+        }
+
+        /// <summary>
+        /// Start the 10-minute respawn loop
+        /// </summary>
+        private void StartMysteryBoxRespawnLoop()
+        {
+            _mysteryBoxRespawnTimer?.Destroy();
+            _mysteryBoxRespawnTimer = timer.Every(MysteryBoxRespawnInterval, () =>
+            {
+                SpawnAllMysteryBoxes();
+            });
+
+            Puts($"[SimplePrefabEditor] Mystery Box respawn loop started (every {MysteryBoxRespawnInterval / 60f} minutes).");
+        }
+
+        /// <summary>
+        /// Spawn Mystery Boxes at all saved spawn points
+        /// </summary>
+        private void SpawnAllMysteryBoxes()
+        {
+            if (_boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+                return;
+
+            int spawned = 0;
+            for (int i = 0; i < _boxData.SpawnPoints.Count; i++)
+            {
+                var sp = _boxData.SpawnPoints[i];
+
+                // Kill existing box at this spawn point if any
+                if (_spawnedBoxes.TryGetValue(i, out var existingEntity))
+                {
+                    if (existingEntity != null && !existingEntity.IsDestroyed)
+                    {
+                        uint oldId = (uint)(existingEntity.net?.ID.Value ?? 0);
+                        if (oldId != 0)
+                        {
+                            if (_mysteryRuntime.TryGetValue(oldId, out var oldRt))
+                            {
+                                oldRt.DeactivationTimer?.Destroy();
+                                _mysteryRuntime.Remove(oldId);
+                            }
+                            _boxData.MysteryBoxes.Remove(oldId);
+                        }
+                        existingEntity.Kill();
+                    }
+                    _spawnedBoxes.Remove(i);
+                }
+
+                // Spawn new box
+                var entity = SpawnMysteryBoxAtPoint(sp, i);
+                if (entity != null)
+                {
+                    sp.IsActive = true;
+                    sp.LastSpawnTime = Time.realtimeSinceStartup;
+                    spawned++;
+                }
+            }
+
+            if (spawned > 0)
+            {
+                SaveData();
+                Puts($"[SimplePrefabEditor] Spawned {spawned} Mystery Box(es). They will deactivate in {MysteryBoxActiveTime / 60f} minutes.");
+
+                // Broadcast to all players
+                foreach (var player in BasePlayer.activePlayerList)
+                {
+                    if (player == null) continue;
+                    player.ChatMessage($"<color=#00ffff>⚡ Mystery Box has spawned! ⚡</color>\n<color=#ffcc00>Available for {MysteryBoxActiveTime / 60f} minutes!</color>");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Spawn a single Mystery Box at a spawn point
+        /// </summary>
+        private BaseEntity SpawnMysteryBoxAtPoint(MysteryBoxSpawnPoint spawnPoint, int spawnPointIndex)
+        {
+            BaseEntity entity;
+            try
+            {
+                entity = GameManager.server.CreateEntity(MysteryBoxRootPrefab, spawnPoint.Position, spawnPoint.Rotation, true);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning($"[SimplePrefabEditor] Failed to spawn Mystery Box: {ex}");
+                return null;
+            }
+
+            if (entity == null)
+                return null;
+
+            entity.Spawn();
+            entity.SendNetworkUpdate();
+
+            uint id = (uint)entity.net.ID.Value;
+
+            // Register this box
+            var def = new MysteryBoxDef
+            {
+                RootEntityId = id,
+                RootPosition = spawnPoint.Position,
+                DisplayOffset = new Vector3(0f, 1.2f, 0f)
+            };
+
+            _boxData.MysteryBoxes[id] = def;
+
+            var runtime = new MysteryBoxRuntime
+            {
+                SpawnTime = Time.realtimeSinceStartup,
+                SpawnPointIndex = spawnPointIndex
+            };
+
+            // Set up deactivation timer (2 minutes)
+            runtime.DeactivationTimer = timer.Once(MysteryBoxActiveTime, () =>
+            {
+                DeactivateMysteryBox(id, spawnPointIndex);
+            });
+
+            _mysteryRuntime[id] = runtime;
+            _spawnedBoxes[spawnPointIndex] = entity;
+
+            return entity;
+        }
+
+        /// <summary>
+        /// Deactivate (despawn) a Mystery Box after 2 minutes
+        /// </summary>
+        private void DeactivateMysteryBox(uint boxId, int spawnPointIndex)
+        {
+            // Clean up runtime
+            if (_mysteryRuntime.TryGetValue(boxId, out var rt))
+            {
+                rt.DeactivationTimer?.Destroy();
+                ClearMysteryBoxGuiForAll(rt);
+                _mysteryRuntime.Remove(boxId);
+            }
+
+            // Clean up box definition
+            _boxData.MysteryBoxes.Remove(boxId);
+
+            // Find and kill the entity
+            var entity = BaseNetworkable.serverEntities.Find(new NetworkableId(boxId)) as BaseEntity;
+            if (entity != null && !entity.IsDestroyed)
+            {
+                entity.Kill();
+            }
+
+            // Update spawn point state
+            if (spawnPointIndex >= 0 && spawnPointIndex < _boxData.SpawnPoints.Count)
+            {
+                _boxData.SpawnPoints[spawnPointIndex].IsActive = false;
+            }
+
+            _spawnedBoxes.Remove(spawnPointIndex);
+
+            // Clear Buy UI and Countdown UI for all players near this box
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player == null) continue;
+                if (_playerVisibleBox.TryGetValue(player.userID, out var currentId) && currentId == boxId)
+                {
+                    DestroyBuyUi(player);
+                    DestroyCountdownUi(player);
+                    _playerVisibleBox[player.userID] = 0;
+                }
+            }
+
+            Puts($"[SimplePrefabEditor] Mystery Box {boxId} deactivated after {MysteryBoxActiveTime / 60f} minutes.");
+        }
+
+        /// <summary>
+        /// Get the remaining time for a Mystery Box before deactivation
+        /// </summary>
+        private float GetRemainingTime(uint boxId)
+        {
+            if (!_mysteryRuntime.TryGetValue(boxId, out var rt))
+                return 0f;
+
+            float elapsed = Time.realtimeSinceStartup - rt.SpawnTime;
+            float remaining = MysteryBoxActiveTime - elapsed;
+            return Mathf.Max(0f, remaining);
+        }
+
+        #endregion
+
         #region Mystery Box Spin Logic (Reused)
 
         private void StartMysteryBoxSpin(uint boxId, BaseEntity root, BasePlayer user)
@@ -1869,12 +2220,24 @@ namespace Oxide.Plugins
                         if (currentUiBoxId != 0)
                         {
                             DestroyBuyUi(player);
+                            DestroyCountdownUi(player);
                             _playerVisibleBox[player.userID] = 0;
                         }
                         continue;
                     }
 
-                    // If closest box is same as current UI, do nothing
+                    // Update countdown UI if box has a timer
+                    float remaining = GetRemainingTime(closestBoxId);
+                    if (remaining > 0)
+                    {
+                        ShowCountdownUi(player, closestBoxId, remaining);
+                    }
+                    else
+                    {
+                        DestroyCountdownUi(player);
+                    }
+
+                    // If closest box is same as current UI, do nothing for buy UI
                     if (currentUiBoxId == closestBoxId)
                         continue;
 
@@ -1972,6 +2335,89 @@ namespace Oxide.Plugins
                 string name = GetBuyUiName(fakeId, player.userID);
                 CuiHelper.DestroyUi(player, name);
             }
+        }
+
+        private string GetCountdownUiName(uint boxId, ulong playerId)
+        {
+            return $"SPE.MysteryBox.Countdown.{boxId}.{playerId}";
+        }
+
+        /// <summary>
+        /// Show or update the countdown timer UI for a Mystery Box
+        /// </summary>
+        private void ShowCountdownUi(BasePlayer player, uint boxId, float remainingSeconds)
+        {
+            if (player == null) return;
+            if (!_boxData.MysteryBoxes.ContainsKey(boxId))
+                return;
+
+            DestroyCountdownUi(player);
+
+            string panelName = GetCountdownUiName(boxId, player.userID);
+
+            int minutes = (int)(remainingSeconds / 60f);
+            int seconds = (int)(remainingSeconds % 60f);
+            string timeText = $"{minutes:00}:{seconds:00}";
+
+            var container = new CuiElementContainer();
+            var panel = new CuiPanel
+            {
+                Image = { Color = "0.1 0.1 0.1 0.8" },
+                RectTransform =
+                {
+                    AnchorMin = "0.4 0.13",
+                    AnchorMax = "0.6 0.20"
+                },
+                CursorEnabled = false
+            };
+            container.Add(panel, "Overlay", panelName);
+
+            // Timer label
+            var label = new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"<color=#ff6600>⏱ Mystery Box Timer: {timeText}</color>",
+                    FontSize = 16,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.05 0.1",
+                    AnchorMax = "0.95 0.9"
+                }
+            };
+            container.Add(label, panelName);
+
+            CuiHelper.AddUi(player, container);
+            _playerCountdownBox[player.userID] = boxId;
+        }
+
+        private void DestroyCountdownUi(BasePlayer player)
+        {
+            if (player == null) return;
+
+            uint currentBoxId = 0;
+            _playerCountdownBox.TryGetValue(player.userID, out currentBoxId);
+
+            if (currentBoxId != 0)
+            {
+                string panelName = GetCountdownUiName(currentBoxId, player.userID);
+                CuiHelper.DestroyUi(player, panelName);
+            }
+
+            // Also clean up any known mystery box countdown UIs
+            if (_boxData != null && _boxData.MysteryBoxes != null)
+            {
+                foreach (var boxId in _boxData.MysteryBoxes.Keys)
+                {
+                    string name = GetCountdownUiName(boxId, player.userID);
+                    CuiHelper.DestroyUi(player, name);
+                }
+            }
+
+            _playerCountdownBox.Remove(player.userID);
         }
 
         [ConsoleCommand("spe.mbox.buy")]
