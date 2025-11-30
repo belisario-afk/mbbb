@@ -8,8 +8,8 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Simple Prefab Editor", "belisario-afk", "6.1.0")]
-    [Description("Spawn, select and live-edit prefab entities with mystery boxes, templates, SignArtist images, rigid group editing, and a Black Ops style Mystery Box with ImageLibrary GUI reel, cascading gun drops, and proximity-buy UI.")]
+    [Info("Simple Prefab Editor", "belisario-afk", "7.0.0")]
+    [Description("Spawn, select and live-edit prefab entities with mystery boxes, templates, SignArtist images, rigid group editing, and a Black Ops style Mystery Box with ImageLibrary GUI reel, cascading gun drops, proximity-buy UI, and auto-registration of medieval large wood boxes.")]
     public class SimplePrefabEditor : RustPlugin
     {
         private const string PermissionUse = "simpleprefabeditor.use";
@@ -18,9 +18,9 @@ namespace Oxide.Plugins
 
         private const ulong DefaultWoodDoorSkinId = 3613584704;
 
-        // Mystery Box root is now a decorative purple sphere
+        // Mystery Box root is now the medieval large wood box (always spawns registered)
         private const string MysteryBoxRootPrefab =
-            "assets/bundled/prefabs/modding/events/twitch/br_sphere_purple.prefab";
+            "assets/prefabs/deployable/large wood storage/skins/medieval_large_wood_box/medieval.box.wooden.large.prefab";
 
         // Proximity radius for showing the BUY UI
         private const float MysteryBoxProximityRadius = 3f;
@@ -245,6 +245,48 @@ namespace Oxide.Plugins
             BuildGunPool();
             InitGunImages();
             StartMysteryBoxProximityLoop();
+            AutoRegisterMedievalBoxes();
+        }
+
+        /// <summary>
+        /// Automatically finds and registers any existing medieval large wood box entities as Mystery Boxes.
+        /// This ensures the specified asset always spawns registered.
+        /// </summary>
+        private void AutoRegisterMedievalBoxes()
+        {
+            int registered = 0;
+            foreach (var entity in BaseNetworkable.serverEntities)
+            {
+                var baseEntity = entity as BaseEntity;
+                if (baseEntity == null || baseEntity.IsDestroyed || baseEntity.net == null)
+                    continue;
+
+                if (!string.Equals(baseEntity.PrefabName, MysteryBoxRootPrefab, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                uint id = (uint)baseEntity.net.ID.Value;
+
+                // Skip if already registered
+                if (_boxData.MysteryBoxes.ContainsKey(id))
+                    continue;
+
+                var def = new MysteryBoxDef
+                {
+                    RootEntityId = id,
+                    RootPosition = baseEntity.transform.position,
+                    DisplayOffset = new Vector3(0f, 1.2f, 0f)
+                };
+
+                _boxData.MysteryBoxes[id] = def;
+                _mysteryRuntime[id] = new MysteryBoxRuntime();
+                registered++;
+            }
+
+            if (registered > 0)
+            {
+                SaveData();
+                Puts($"[SimplePrefabEditor] Auto-registered {registered} medieval large wood box(es) as Mystery Box(es).");
+            }
         }
 
         private void Unload()
@@ -1212,7 +1254,7 @@ namespace Oxide.Plugins
             var ent = GetLookAtEntity(player, 5f);
             if (ent == null || ent.net == null)
             {
-                PrintToChat(player, "<color=#ffcc00>Look at the purple sphere you want to register.</color>");
+                PrintToChat(player, "<color=#ffcc00>Look at the medieval large wood box you want to register.</color>");
                 return;
             }
 
@@ -1238,9 +1280,9 @@ namespace Oxide.Plugins
             _mysteryRuntime[id] = new MysteryBoxRuntime();
 
             PrintToChat(player,
-                $"<color=#00ff00>Registered Mystery Box root (purple sphere):</color> {ent.ShortPrefabName} ({id})");
+                $"<color=#00ff00>Registered Mystery Box (medieval box):</color> {ent.ShortPrefabName} ({id})");
             PrintToChat(player,
-                "Players will see a BUY UI when close to this sphere and can click it to roll the Mystery Box.");
+                "Players will see a BUY UI when close to this box and can click it to roll the Mystery Box.");
         }
 
         private void CmdMBoxUnregister(BasePlayer player, string command, string[] args)
@@ -1251,7 +1293,7 @@ namespace Oxide.Plugins
             var ent = GetLookAtEntity(player, 5f);
             if (ent == null || ent.net == null)
             {
-                PrintToChat(player, "<color=#ffcc00>Look at the sphere root you want to unregister.</color>");
+                PrintToChat(player, "<color=#ffcc00>Look at the medieval box you want to unregister.</color>");
                 return;
             }
 
@@ -1295,20 +1337,20 @@ namespace Oxide.Plugins
             var ent = GetLookAtEntity(player, 5f);
             if (ent == null || ent.net == null)
             {
-                PrintToChat(player, "<color=#ffcc00>Look at a registered Mystery Box sphere.</color>");
+                PrintToChat(player, "<color=#ffcc00>Look at a registered Mystery Box.</color>");
                 return;
             }
 
             if (!string.Equals(ent.PrefabName, MysteryBoxRootPrefab, StringComparison.OrdinalIgnoreCase))
             {
-                PrintToChat(player, "<color=#ffcc00>That is not a Mystery Box root (sphere).</color>");
+                PrintToChat(player, "<color=#ffcc00>That is not a Mystery Box (medieval box).</color>");
                 return;
             }
 
             uint id = (uint)ent.net.ID.Value;
             if (!_boxData.MysteryBoxes.ContainsKey(id))
             {
-                PrintToChat(player, "<color=#ffcc00>This sphere is not registered as a Mystery Box. Ask an admin to run /mbox_register.</color>");
+                PrintToChat(player, "<color=#ffcc00>This medieval box is not registered as a Mystery Box. It should auto-register on spawn, or an admin can run /mbox_register.</color>");
                 return;
             }
 
@@ -1342,14 +1384,14 @@ namespace Oxide.Plugins
             var ent = GetLookAtEntity(player, 5f);
             if (ent == null || ent.net == null)
             {
-                PrintToChat(player, "<color=#ffcc00>Look at a registered Mystery Box sphere.</color>");
+                PrintToChat(player, "<color=#ffcc00>Look at a registered Mystery Box (medieval box).</color>");
                 return;
             }
 
             uint id = (uint)ent.net.ID.Value;
             if (!_boxData.MysteryBoxes.ContainsKey(id))
             {
-                PrintToChat(player, "<color=#ffcc00>That entity is not a registered Mystery Box. Use /mbox_register first.</color>");
+                PrintToChat(player, "<color=#ffcc00>That entity is not a registered Mystery Box. Medieval boxes auto-register on spawn, or use /mbox_register.</color>");
                 return;
             }
 
@@ -1631,6 +1673,41 @@ namespace Oxide.Plugins
                     _playerVisibleBox[p.userID] = 0;
                 }
             }
+        }
+
+        /// <summary>
+        /// Automatically registers newly spawned medieval large wood box entities as Mystery Boxes.
+        /// </summary>
+        private void OnEntitySpawned(BaseNetworkable entity)
+        {
+            if (entity == null || entity.net == null)
+                return;
+
+            var baseEntity = entity as BaseEntity;
+            if (baseEntity == null || baseEntity.IsDestroyed)
+                return;
+
+            if (!string.Equals(baseEntity.PrefabName, MysteryBoxRootPrefab, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            uint id = (uint)baseEntity.net.ID.Value;
+
+            // Skip if already registered
+            if (_boxData.MysteryBoxes.ContainsKey(id))
+                return;
+
+            var def = new MysteryBoxDef
+            {
+                RootEntityId = id,
+                RootPosition = baseEntity.transform.position,
+                DisplayOffset = new Vector3(0f, 1.2f, 0f)
+            };
+
+            _boxData.MysteryBoxes[id] = def;
+            _mysteryRuntime[id] = new MysteryBoxRuntime();
+            SaveData();
+
+            Puts($"[SimplePrefabEditor] Auto-registered newly spawned medieval box as Mystery Box: {baseEntity.ShortPrefabName} ({id})");
         }
 
         #endregion
