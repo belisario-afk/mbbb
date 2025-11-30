@@ -1680,6 +1680,10 @@ namespace Oxide.Plugins
         /// </summary>
         private void OnEntitySpawned(BaseNetworkable entity)
         {
+            // Ensure plugin is fully initialized
+            if (_boxData == null || _mysteryRuntime == null)
+                return;
+
             if (entity == null || entity.net == null)
                 return;
 
@@ -1705,7 +1709,9 @@ namespace Oxide.Plugins
 
             _boxData.MysteryBoxes[id] = def;
             _mysteryRuntime[id] = new MysteryBoxRuntime();
-            SaveData();
+
+            // Use a short timer to batch saves when multiple boxes spawn simultaneously
+            timer.Once(0.5f, () => SaveData());
 
             Puts($"[SimplePrefabEditor] Auto-registered newly spawned medieval box as Mystery Box: {baseEntity.ShortPrefabName} ({id})");
         }
