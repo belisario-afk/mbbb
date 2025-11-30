@@ -91,7 +91,7 @@ namespace Oxide.Plugins
         private class MysteryBoxSpawnPoint
         {
             public Vector3 Position;
-            public Quaternion Rotation;
+            public Vector3 RotationEuler;   // Store rotation as Euler angles (Vector3) for JSON serialization
             public bool IsActive;           // Whether a box is currently spawned here
             public float LastSpawnTime;     // Server time when last spawned
         }
@@ -1531,7 +1531,7 @@ namespace Oxide.Plugins
             var spawnPoint = new MysteryBoxSpawnPoint
             {
                 Position = player.transform.position,
-                Rotation = player.transform.rotation,
+                RotationEuler = player.transform.rotation.eulerAngles,  // Store as Euler angles for JSON serialization
                 IsActive = false,
                 LastSpawnTime = 0f
             };
@@ -1710,7 +1710,9 @@ namespace Oxide.Plugins
             BaseEntity entity;
             try
             {
-                entity = GameManager.server.CreateEntity(MysteryBoxRootPrefab, spawnPoint.Position, spawnPoint.Rotation, true);
+                // Convert stored Euler angles back to Quaternion for spawning
+                Quaternion rotation = Quaternion.Euler(spawnPoint.RotationEuler);
+                entity = GameManager.server.CreateEntity(MysteryBoxRootPrefab, spawnPoint.Position, rotation, true);
             }
             catch (Exception ex)
             {
