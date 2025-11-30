@@ -171,6 +171,8 @@ namespace Oxide.Plugins
         private const float MysteryBoxRespawnInterval = 600f;    // 10 minutes in seconds
         private const float MysteryBoxActiveTime = 120f;         // 2 minutes active before deactivation
         private Timer _mysteryBoxRespawnTimer;
+        private Timer _spawnCountdownUiTimer;                    // Timer to update the global spawn countdown UI
+        private float _lastSpawnTime;                            // Server time when boxes last spawned
         private readonly Dictionary<int, BaseEntity> _spawnedBoxes = new Dictionary<int, BaseEntity>(); // SpawnPointIndex -> Entity
 
         // Track which box UI is visible for each player (only 1 box UI at a time per player)
@@ -336,6 +338,7 @@ namespace Oxide.Plugins
                 DestroyMysteryGuiForPlayer(player);
                 DestroyBuyUi(player);
                 DestroyCountdownUi(player);
+                DestroyGlobalSpawnCountdownUi(player);
             }
 
             _mboxProximityTimer?.Destroy();
@@ -343,6 +346,9 @@ namespace Oxide.Plugins
 
             _mysteryBoxRespawnTimer?.Destroy();
             _mysteryBoxRespawnTimer = null;
+
+            _spawnCountdownUiTimer?.Destroy();
+            _spawnCountdownUiTimer = null;
 
             // Destroy all deactivation timers
             foreach (var rt in _mysteryRuntime.Values)
@@ -366,6 +372,7 @@ namespace Oxide.Plugins
             DestroyMysteryGuiForPlayer(player);
             DestroyBuyUi(player);
             DestroyCountdownUi(player);
+            DestroyGlobalSpawnCountdownUi(player);
 
             if (editing.TryGetValue(player.userID, out var state))
             {
@@ -1632,17 +1639,48 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// Start the 10-minute respawn loop
+         /// Start the 10-minute respawn loop
         /// </summary>
         private void StartMysteryBoxRespawnLoop()
         {
             _mysteryBoxRespawnTimer?.Destroy();
+            _lastSpawnTime = Time.realtimeSinceStartup;  // Track when boxes spawned/will spawn
+            
             _mysteryBoxRespawnTimer = timer.Every(MysteryBoxRespawnInterval, () =>
             {
+                _lastSpawnTime = Time.realtimeSinceStartup;
                 SpawnAllMysteryBoxes();
             });
 
+            // Start the spawn countdown UI update timer (updates every 1 second)
+            StartSpawnCountdownUiLoop();
+
             Puts($"[SimplePrefabEditor] Mystery Box respawn loop started (every {MysteryBoxRespawnInterval / 60f} minutes).");
+        }
+
+        /// <summary>
+        /// Start the UI loop that updates the global spawn countdown for all players
+        /// </summary>
+        private void StartSpawnCountdownUiLoop()
+        {
+            _spawnCountdownUiTimer?.Destroy();
+            _spawnCountdownUiTimer = timer.Every(1f, () =>
+            {
+                if (_boxData == null || _boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+                    return;
+
+                float elapsed = Time.realtimeSinceStartup - _lastSpawnTime;
+                float remaining = MysteryBoxRespawnInterval - elapsed;
+                
+                if (remaining < 0)
+                    remaining = 0;
+
+                foreach (var player in BasePlayer.activePlayerList)
+                {
+                    if (player == null || !player.IsConnected) continue;
+                    ShowGlobalSpawnCountdownUi(player, remaining);
+                }
+            });
         }
 
         /// <summary>
@@ -2420,6 +2458,72 @@ namespace Oxide.Plugins
             }
 
             _playerCountdownBox.Remove(player.userID);
+        }
+
+        private const string GlobalSpawnCountdownUiName = "SPE.MysteryBox.GlobalSpawnCountdown";
+
+        /// <summary>
+        /// Show the global spawn countdown timer UI (shows time until next Mystery Box spawn)
+        /// </summary>
+        private void ShowGlobalSpawnCountdownUi(BasePlayer player, float remainingSeconds)
+        {
+            if (player == null) return;
+
+            // Don't show if no spawn points are configured
+            if (_boxData == null || _boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+            {
+                DestroyGlobalSpawnCountdownUi(player);
+                return;
+            }
+
+            string panelName = $"{GlobalSpawnCountdownUiName}.{player.userID}";
+
+            // Destroy existing UI first
+            CuiHelper.DestroyUi(player, panelName);
+
+            int minutes = (int)(remainingSeconds / 60f);
+            int seconds = (int)(remainingSeconds % 60f);
+            string timeText = $"{minutes:00}:{seconds:00}";
+
+            var container = new CuiElementContainer();
+            var panel = new CuiPanel
+            {
+                Image = { Color = "0.1 0.1 0.1 0.7" },
+                RectTransform =
+                {
+                    AnchorMin = "0.01 0.92",
+                    AnchorMax = "0.18 0.98"
+                },
+                CursorEnabled = false
+            };
+            container.Add(panel, "Overlay", panelName);
+
+            // Timer label
+            var label = new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"<color=#00ffff>⚡ Next Mystery Box: {timeText}</color>",
+                    FontSize = 12,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.05 0.1",
+                    AnchorMax = "0.95 0.9"
+                }
+            };
+            container.Add(label, panelName);
+
+            CuiHelper.AddUi(player, container);
+        }
+
+        private void DestroyGlobalSpawnCountdownUi(BasePlayer player)
+        {
+            if (player == null) return;
+            string panelName = $"{GlobalSpawnCountdownUiName}.{player.userID}";
+            CuiHelper.DestroyUi(player, panelName);
         }
 
         [ConsoleCommand("spe.mbox.buy")]
