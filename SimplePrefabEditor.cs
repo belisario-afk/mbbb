@@ -1551,59 +1551,43 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// Force cleanup all Mystery Box UIs for all players (emergency cleanup command)
-        /// Also clears all data to prevent the proximity loop from recreating UIs
+        /// Clean up orphaned/stuck UIs only - does NOT affect spawn points, timers, or data
+        /// Use this when old UIs are stuck on screen after boxes were destroyed
         /// </summary>
         private void CmdMBoxClearUi(BasePlayer player, string command, string[] args)
         {
             if (!HasPermission(player))
                 return;
 
-            // Store known box IDs before clearing
-            var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
-
-            // Clear ALL data to prevent the proximity loop from recreating UIs
-            _boxData.MysteryBoxes.Clear();
-            _boxData.SpawnPoints.Clear();
-            _mysteryRuntime.Clear();
-            _spawnedBoxes.Clear();
-            SaveData();
-
             int cleaned = 0;
             foreach (var p in BasePlayer.activePlayerList)
             {
                 if (p == null) continue;
 
-                // Destroy UIs for known box IDs
-                foreach (var boxId in knownBoxIds)
+                // Destroy UIs for all known box IDs
+                foreach (var boxId in _boxData.MysteryBoxes.Keys)
                 {
                     CuiHelper.DestroyUi(p, GetBuyUiName(boxId, p.userID));
                     CuiHelper.DestroyUi(p, GetMysteryGuiName(boxId, p.userID));
                     CuiHelper.DestroyUi(p, GetCountdownUiName(boxId, p.userID));
                 }
 
-                // Brute-force cleanup for orphaned UIs (high range for entity IDs)
-                for (uint fakeId = 1; fakeId <= 50000; fakeId++)
+                // Brute-force cleanup for orphaned UIs (extended range for high entity IDs)
+                for (uint fakeId = 1; fakeId <= 100000; fakeId++)
                 {
                     CuiHelper.DestroyUi(p, GetBuyUiName(fakeId, p.userID));
                     CuiHelper.DestroyUi(p, GetMysteryGuiName(fakeId, p.userID));
                     CuiHelper.DestroyUi(p, GetCountdownUiName(fakeId, p.userID));
                 }
 
-                // Destroy global UIs
-                DestroyGlobalSpawnCountdownUi(p);
-                DestroyCountdownUi(p);
-                DestroyBuyUi(p);
-                DestroyMysteryGuiForPlayer(p);
-
                 cleaned++;
             }
 
-            // Clear tracking dictionaries
+            // Only clear tracking dictionaries, NOT the actual data
             _playerVisibleBox.Clear();
             _playerCountdownBox.Clear();
 
-            PrintToChat(player, $"<color=#00ff00>Forced UI cleanup for {cleaned} player(s). All mystery box data has been cleared.</color>");
+            PrintToChat(player, $"<color=#00ff00>Cleaned orphaned UIs for {cleaned} player(s).</color> Spawn points and timers are still active.");
         }
 
         /// <summary>
