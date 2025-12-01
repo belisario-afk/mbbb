@@ -273,6 +273,7 @@ namespace Oxide.Plugins
             cmd.AddChatCommand("mbox_removespawn", this, CmdMBoxRemoveSpawn);
             cmd.AddChatCommand("mbox_listspawns", this, CmdMBoxListSpawns);
             cmd.AddChatCommand("mbox_forcespawn", this, CmdMBoxForceSpawn);
+            cmd.AddChatCommand("mbox_starttimer", this, CmdMBoxStartTimer);
         }
 
         private void OnServerInitialized()
@@ -1625,6 +1626,12 @@ namespace Oxide.Plugins
             _boxData.SpawnPoints.Add(spawnPoint);
             SaveData();
 
+            // Restart timers if they're not running (e.g., after /mbox_clearall)
+            if (_mysteryBoxRespawnTimer == null)
+            {
+                StartMysteryBoxRespawnLoop();
+            }
+
             int index = _boxData.SpawnPoints.Count - 1;
             PrintToChat(player, $"<color=#00ff00>Added Mystery Box spawn point #{index}</color> at your position.\n" +
                 $"Position: {spawnPoint.Position}\n" +
@@ -1715,6 +1722,26 @@ namespace Oxide.Plugins
 
             SpawnAllMysteryBoxes();
             PrintToChat(player, $"<color=#00ff00>Force spawned Mystery Boxes at all {_boxData.SpawnPoints.Count} spawn points.</color>");
+        }
+
+        /// <summary>
+        /// Manually start/restart the respawn and countdown timers
+        /// </summary>
+        private void CmdMBoxStartTimer(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            if (_boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
+            {
+                PrintToChat(player, "<color=#ffcc00>No spawn points configured.</color> Add spawn points first with /mbox_addspawn");
+                return;
+            }
+
+            StartMysteryBoxRespawnLoop();
+            PrintToChat(player, "<color=#00ff00>Mystery Box timers started!</color>\n" +
+                $"Next spawn in {MysteryBoxRespawnInterval / 60f} minutes.\n" +
+                "You should now see the countdown timer in the top-left corner.");
         }
 
         /// <summary>
