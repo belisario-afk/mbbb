@@ -1539,19 +1539,27 @@ namespace Oxide.Plugins
 
         /// <summary>
         /// Force cleanup all Mystery Box UIs for all players (emergency cleanup command)
+        /// Also clears all data to prevent the proximity loop from recreating UIs
         /// </summary>
         private void CmdMBoxClearUi(BasePlayer player, string command, string[] args)
         {
             if (!HasPermission(player))
                 return;
 
+            // Store known box IDs before clearing
+            var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
+
+            // Clear ALL data to prevent the proximity loop from recreating UIs
+            _boxData.MysteryBoxes.Clear();
+            _boxData.SpawnPoints.Clear();
+            _mysteryRuntime.Clear();
+            _spawnedBoxes.Clear();
+            SaveData();
+
             int cleaned = 0;
             foreach (var p in BasePlayer.activePlayerList)
             {
                 if (p == null) continue;
-
-                // Get all known box IDs
-                var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
 
                 // Destroy UIs for known box IDs
                 foreach (var boxId in knownBoxIds)
@@ -1561,7 +1569,7 @@ namespace Oxide.Plugins
                     CuiHelper.DestroyUi(p, GetCountdownUiName(boxId, p.userID));
                 }
 
-                // Brute-force cleanup for orphaned UIs
+                // Brute-force cleanup for orphaned UIs (high range for entity IDs)
                 for (uint fakeId = 1; fakeId <= 50000; fakeId++)
                 {
                     CuiHelper.DestroyUi(p, GetBuyUiName(fakeId, p.userID));
@@ -1582,7 +1590,7 @@ namespace Oxide.Plugins
             _playerVisibleBox.Clear();
             _playerCountdownBox.Clear();
 
-            PrintToChat(player, $"<color=#00ff00>Forced UI cleanup for {cleaned} player(s).</color>");
+            PrintToChat(player, $"<color=#00ff00>Forced UI cleanup for {cleaned} player(s). All mystery box data has been cleared.</color>");
         }
 
         /// <summary>
