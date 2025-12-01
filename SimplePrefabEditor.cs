@@ -266,14 +266,12 @@ namespace Oxide.Plugins
             cmd.AddChatCommand("mbox_use", this, CmdMBoxUse);
             cmd.AddChatCommand("mbox_test", this, CmdMBoxTest);
             cmd.AddChatCommand("mbox_clearall", this, CmdMBoxClearAll);
-            cmd.AddChatCommand("mbox_clearui", this, CmdMBoxClearUi);
 
             // Spawn point management commands
             cmd.AddChatCommand("mbox_addspawn", this, CmdMBoxAddSpawn);
             cmd.AddChatCommand("mbox_removespawn", this, CmdMBoxRemoveSpawn);
             cmd.AddChatCommand("mbox_listspawns", this, CmdMBoxListSpawns);
             cmd.AddChatCommand("mbox_forcespawn", this, CmdMBoxForceSpawn);
-            cmd.AddChatCommand("mbox_starttimer", this, CmdMBoxStartTimer);
         }
 
         private void OnServerInitialized()
@@ -1488,107 +1486,29 @@ namespace Oxide.Plugins
             if (!HasPermission(player))
                 return;
 
-            // Store known box IDs before clearing
-            var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
-
-            // 1) Kill all spawned Mystery Box entities
-            foreach (var kv in _spawnedBoxes)
-            {
-                var entity = kv.Value;
-                if (entity != null && !entity.IsDestroyed)
-                    entity.Kill();
-            }
-
-            // 2) Destroy all deactivation timers
-            foreach (var rt in _mysteryRuntime.Values)
-            {
-                rt.DeactivationTimer?.Destroy();
-                rt.DeactivationTimer = null;
-            }
-
-            // 3) Stop the respawn timer so no new boxes spawn
-            _mysteryBoxRespawnTimer?.Destroy();
-            _mysteryBoxRespawnTimer = null;
-
-            // 4) Stop the spawn countdown UI timer
-            _spawnCountdownUiTimer?.Destroy();
-            _spawnCountdownUiTimer = null;
-
-            // 5) Clear all data & runtime state
+            // 1) Clear all data & runtime state
             _boxData.MysteryBoxes.Clear();
-            _boxData.SpawnPoints.Clear();
             _mysteryRuntime.Clear();
             _playerVisibleBox.Clear();
-            _playerCountdownBox.Clear();
-            _spawnedBoxes.Clear();
             SaveData();
 
-            // 6) Destroy ALL possible Mystery Box UI for ALL players
+            // 2) Destroy ALL possible Mystery Box UI for ALL players
             foreach (var p in BasePlayer.activePlayerList)
             {
                 if (p == null) continue;
 
-                // Destroy UIs for known box IDs first
-                foreach (var boxId in knownBoxIds)
+                // Destroy any BUY UI and Reel UI with known or possible IDs
+                for (uint fakeId = 1; fakeId <= 2000; fakeId++)
                 {
-                    CuiHelper.DestroyUi(p, GetBuyUiName(boxId, p.userID));
-                    CuiHelper.DestroyUi(p, GetMysteryGuiName(boxId, p.userID));
-                    CuiHelper.DestroyUi(p, GetCountdownUiName(boxId, p.userID));
-                }
+                    string buyName = GetBuyUiName(fakeId, p.userID);
+                    CuiHelper.DestroyUi(p, buyName);
 
-                // Brute-force cleanup for any orphaned UIs (extended range for high entity IDs)
-                for (uint fakeId = 1; fakeId <= 100000; fakeId++)
-                {
-                    CuiHelper.DestroyUi(p, GetBuyUiName(fakeId, p.userID));
-                    CuiHelper.DestroyUi(p, GetMysteryGuiName(fakeId, p.userID));
-                    CuiHelper.DestroyUi(p, GetCountdownUiName(fakeId, p.userID));
+                    string reelName = GetMysteryGuiName(fakeId, p.userID);
+                    CuiHelper.DestroyUi(p, reelName);
                 }
-
-                // Destroy the global spawn countdown UI
-                DestroyGlobalSpawnCountdownUi(p);
             }
 
-            PrintToChat(player, "<color=#ff0000>All Mystery Boxes permanently cleared.</color> Use /mbox_addspawn to add new spawn points.");
-        }
-
-        /// <summary>
-        /// Clean up orphaned/stuck UIs only - does NOT affect spawn points, timers, or data
-        /// Use this when old UIs are stuck on screen after boxes were destroyed
-        /// </summary>
-        private void CmdMBoxClearUi(BasePlayer player, string command, string[] args)
-        {
-            if (!HasPermission(player))
-                return;
-
-            int cleaned = 0;
-            foreach (var p in BasePlayer.activePlayerList)
-            {
-                if (p == null) continue;
-
-                // Destroy UIs for all known box IDs
-                foreach (var boxId in _boxData.MysteryBoxes.Keys)
-                {
-                    CuiHelper.DestroyUi(p, GetBuyUiName(boxId, p.userID));
-                    CuiHelper.DestroyUi(p, GetMysteryGuiName(boxId, p.userID));
-                    CuiHelper.DestroyUi(p, GetCountdownUiName(boxId, p.userID));
-                }
-
-                // Brute-force cleanup for orphaned UIs (extended range for high entity IDs)
-                for (uint fakeId = 1; fakeId <= 100000; fakeId++)
-                {
-                    CuiHelper.DestroyUi(p, GetBuyUiName(fakeId, p.userID));
-                    CuiHelper.DestroyUi(p, GetMysteryGuiName(fakeId, p.userID));
-                    CuiHelper.DestroyUi(p, GetCountdownUiName(fakeId, p.userID));
-                }
-
-                cleaned++;
-            }
-
-            // Only clear tracking dictionaries, NOT the actual data
-            _playerVisibleBox.Clear();
-            _playerCountdownBox.Clear();
-
-            PrintToChat(player, $"<color=#00ff00>Cleaned orphaned UIs for {cleaned} player(s).</color> Spawn points and timers are still active.");
+            PrintToChat(player, "<color=#ff0000>All Mystery Boxes and their UIs have been cleared.</color>");
         }
 
         /// <summary>
@@ -1625,12 +1545,6 @@ namespace Oxide.Plugins
 
             _boxData.SpawnPoints.Add(spawnPoint);
             SaveData();
-
-            // Restart timers if they're not running (e.g., after /mbox_clearall)
-            if (_mysteryBoxRespawnTimer == null)
-            {
-                StartMysteryBoxRespawnLoop();
-            }
 
             int index = _boxData.SpawnPoints.Count - 1;
             PrintToChat(player, $"<color=#00ff00>Added Mystery Box spawn point #{index}</color> at your position.\n" +
@@ -1722,26 +1636,6 @@ namespace Oxide.Plugins
 
             SpawnAllMysteryBoxes();
             PrintToChat(player, $"<color=#00ff00>Force spawned Mystery Boxes at all {_boxData.SpawnPoints.Count} spawn points.</color>");
-        }
-
-        /// <summary>
-        /// Manually start/restart the respawn and countdown timers
-        /// </summary>
-        private void CmdMBoxStartTimer(BasePlayer player, string command, string[] args)
-        {
-            if (!HasPermission(player))
-                return;
-
-            if (_boxData.SpawnPoints == null || _boxData.SpawnPoints.Count == 0)
-            {
-                PrintToChat(player, "<color=#ffcc00>No spawn points configured.</color> Add spawn points first with /mbox_addspawn");
-                return;
-            }
-
-            StartMysteryBoxRespawnLoop();
-            PrintToChat(player, "<color=#00ff00>Mystery Box timers started!</color>\n" +
-                $"Next spawn in {MysteryBoxRespawnInterval / 60f} minutes.\n" +
-                "You should now see the countdown timer in the top-left corner.");
         }
 
         /// <summary>
@@ -2472,16 +2366,14 @@ namespace Oxide.Plugins
             {
                 string panelName = GetBuyUiName(currentBoxId, player.userID);
                 CuiHelper.DestroyUi(player, panelName);
+                return;
             }
 
-            // Also destroy UIs for all known box IDs
-            if (_boxData != null && _boxData.MysteryBoxes != null)
+            // Otherwise, brute-force a cleanup
+            for (uint fakeId = 1; fakeId <= 2000; fakeId++)
             {
-                foreach (var boxId in _boxData.MysteryBoxes.Keys)
-                {
-                    string name = GetBuyUiName(boxId, player.userID);
-                    CuiHelper.DestroyUi(player, name);
-                }
+                string name = GetBuyUiName(fakeId, player.userID);
+                CuiHelper.DestroyUi(player, name);
             }
         }
 
