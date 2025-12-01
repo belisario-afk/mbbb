@@ -266,6 +266,7 @@ namespace Oxide.Plugins
             cmd.AddChatCommand("mbox_use", this, CmdMBoxUse);
             cmd.AddChatCommand("mbox_test", this, CmdMBoxTest);
             cmd.AddChatCommand("mbox_clearall", this, CmdMBoxClearAll);
+            cmd.AddChatCommand("mbox_clearui", this, CmdMBoxClearUi);
 
             // Spawn point management commands
             cmd.AddChatCommand("mbox_addspawn", this, CmdMBoxAddSpawn);
@@ -1486,10 +1487,16 @@ namespace Oxide.Plugins
             if (!HasPermission(player))
                 return;
 
+            // Store known box IDs before clearing
+            var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
+
             // 1) Clear all data & runtime state
             _boxData.MysteryBoxes.Clear();
+            _boxData.SpawnPoints.Clear();
             _mysteryRuntime.Clear();
             _playerVisibleBox.Clear();
+            _playerCountdownBox.Clear();
+            _spawnedBoxes.Clear();
             SaveData();
 
             // 2) Destroy ALL possible Mystery Box UI for ALL players
@@ -1497,7 +1504,20 @@ namespace Oxide.Plugins
             {
                 if (p == null) continue;
 
-                // Destroy any BUY UI and Reel UI with known or possible IDs
+                // Destroy UIs for known box IDs first
+                foreach (var boxId in knownBoxIds)
+                {
+                    string buyName = GetBuyUiName(boxId, p.userID);
+                    CuiHelper.DestroyUi(p, buyName);
+
+                    string reelName = GetMysteryGuiName(boxId, p.userID);
+                    CuiHelper.DestroyUi(p, reelName);
+
+                    string countdownName = GetCountdownUiName(boxId, p.userID);
+                    CuiHelper.DestroyUi(p, countdownName);
+                }
+
+                // Also brute-force cleanup for any orphaned UIs with low IDs
                 for (uint fakeId = 1; fakeId <= 2000; fakeId++)
                 {
                     string buyName = GetBuyUiName(fakeId, p.userID);
@@ -1505,10 +1525,64 @@ namespace Oxide.Plugins
 
                     string reelName = GetMysteryGuiName(fakeId, p.userID);
                     CuiHelper.DestroyUi(p, reelName);
+
+                    string countdownName = GetCountdownUiName(fakeId, p.userID);
+                    CuiHelper.DestroyUi(p, countdownName);
                 }
+
+                // Destroy the global spawn countdown UI
+                DestroyGlobalSpawnCountdownUi(p);
             }
 
-            PrintToChat(player, "<color=#ff0000>All Mystery Boxes and their UIs have been cleared.</color>");
+            PrintToChat(player, "<color=#ff0000>All Mystery Boxes, spawn points, and their UIs have been cleared.</color>");
+        }
+
+        /// <summary>
+        /// Force cleanup all Mystery Box UIs for all players (emergency cleanup command)
+        /// </summary>
+        private void CmdMBoxClearUi(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player))
+                return;
+
+            int cleaned = 0;
+            foreach (var p in BasePlayer.activePlayerList)
+            {
+                if (p == null) continue;
+
+                // Get all known box IDs
+                var knownBoxIds = new List<uint>(_boxData.MysteryBoxes.Keys);
+
+                // Destroy UIs for known box IDs
+                foreach (var boxId in knownBoxIds)
+                {
+                    CuiHelper.DestroyUi(p, GetBuyUiName(boxId, p.userID));
+                    CuiHelper.DestroyUi(p, GetMysteryGuiName(boxId, p.userID));
+                    CuiHelper.DestroyUi(p, GetCountdownUiName(boxId, p.userID));
+                }
+
+                // Brute-force cleanup for orphaned UIs
+                for (uint fakeId = 1; fakeId <= 50000; fakeId++)
+                {
+                    CuiHelper.DestroyUi(p, GetBuyUiName(fakeId, p.userID));
+                    CuiHelper.DestroyUi(p, GetMysteryGuiName(fakeId, p.userID));
+                    CuiHelper.DestroyUi(p, GetCountdownUiName(fakeId, p.userID));
+                }
+
+                // Destroy global UIs
+                DestroyGlobalSpawnCountdownUi(p);
+                DestroyCountdownUi(p);
+                DestroyBuyUi(p);
+                DestroyMysteryGuiForPlayer(p);
+
+                cleaned++;
+            }
+
+            // Clear tracking dictionaries
+            _playerVisibleBox.Clear();
+            _playerCountdownBox.Clear();
+
+            PrintToChat(player, $"<color=#00ff00>Forced UI cleanup for {cleaned} player(s).</color>");
         }
 
         /// <summary>
@@ -2366,14 +2440,16 @@ namespace Oxide.Plugins
             {
                 string panelName = GetBuyUiName(currentBoxId, player.userID);
                 CuiHelper.DestroyUi(player, panelName);
-                return;
             }
 
-            // Otherwise, brute-force a cleanup
-            for (uint fakeId = 1; fakeId <= 2000; fakeId++)
+            // Also destroy UIs for all known box IDs
+            if (_boxData != null && _boxData.MysteryBoxes != null)
             {
-                string name = GetBuyUiName(fakeId, player.userID);
-                CuiHelper.DestroyUi(player, name);
+                foreach (var boxId in _boxData.MysteryBoxes.Keys)
+                {
+                    string name = GetBuyUiName(boxId, player.userID);
+                    CuiHelper.DestroyUi(player, name);
+                }
             }
         }
 
