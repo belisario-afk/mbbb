@@ -2043,25 +2043,77 @@ namespace Oxide.Plugins
 
             uint id = (uint)ent.net.ID.Value;
 
+            // Find and remove the spawn point associated with this entity
+            int spawnPointToRemove = -1;
+            foreach (var kv in _spawnedBoxes)
+            {
+                if (kv.Value != null && kv.Value == ent)
+                {
+                    spawnPointToRemove = kv.Key;
+                    break;
+                }
+            }
+
+            if (spawnPointToRemove >= 0)
+            {
+                _spawnedBoxes.Remove(spawnPointToRemove);
+                
+                // Also remove the spawn point from saved data so it doesn't respawn
+                if (spawnPointToRemove < _boxData.SpawnPoints.Count)
+                {
+                    _boxData.SpawnPoints.RemoveAt(spawnPointToRemove);
+                    
+                    // Update indices in _spawnedBoxes dictionary after removal
+                    var updatedBoxes = new Dictionary<int, BaseEntity>();
+                    foreach (var kv in _spawnedBoxes)
+                    {
+                        int newIndex = kv.Key > spawnPointToRemove ? kv.Key - 1 : kv.Key;
+                        updatedBoxes[newIndex] = kv.Value;
+                    }
+                    _spawnedBoxes.Clear();
+                    foreach (var kv in updatedBoxes)
+                        _spawnedBoxes[kv.Key] = kv.Value;
+                    
+                    Puts($"[SimplePrefabEditor] Spawn point #{spawnPointToRemove} removed because Mystery Box was destroyed.");
+                }
+            }
+
             if (_boxData.MysteryBoxes.Remove(id))
             {
                 Puts($"[SimplePrefabEditor] Mystery Box root entity destroyed, auto-unregistering box {id}.");
-                SaveData();
             }
+            
+            SaveData();
 
             if (_mysteryRuntime.TryGetValue(id, out var runtime))
             {
+                runtime.DeactivationTimer?.Destroy();
                 ClearMysteryBoxGuiForAll(runtime);
                 _mysteryRuntime.Remove(id);
             }
 
+            // Clean up ALL UIs for ALL players for this box
             foreach (var p in BasePlayer.activePlayerList)
             {
                 if (p == null) continue;
+                
+                // Destroy Buy UI
+                CuiHelper.DestroyUi(p, GetBuyUiName(id, p.userID));
+                
+                // Destroy Countdown UI
+                CuiHelper.DestroyUi(p, GetCountdownUiName(id, p.userID));
+                
+                // Destroy Mystery Gui (reel)
+                CuiHelper.DestroyUi(p, GetMysteryGuiName(id, p.userID));
+                
+                // Update tracking
                 if (_playerVisibleBox.TryGetValue(p.userID, out var currentId) && currentId == id)
                 {
-                    DestroyBuyUi(p);
                     _playerVisibleBox[p.userID] = 0;
+                }
+                if (_playerCountdownBox.TryGetValue(p.userID, out var countdownId) && countdownId == id)
+                {
+                    _playerCountdownBox[p.userID] = 0;
                 }
             }
         }
