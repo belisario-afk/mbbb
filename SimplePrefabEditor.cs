@@ -384,6 +384,37 @@ namespace Oxide.Plugins
             _playerCountdownBox.Remove(player.userID);
         }
 
+        /// <summary>
+        /// Clean up any stale/orphaned UIs when a player connects or reconnects
+        /// </summary>
+        private void OnPlayerConnected(BasePlayer player)
+        {
+            if (player == null) return;
+            
+            // Delay cleanup slightly to ensure player is fully connected
+            timer.Once(1f, () =>
+            {
+                if (player == null || !player.IsConnected) return;
+                
+                // Clean up any orphaned UIs from previous sessions
+                DestroyMysteryGuiForPlayer(player);
+                DestroyBuyUi(player);
+                DestroyCountdownUi(player);
+                
+                // Brute-force cleanup for any orphaned UIs with unknown IDs
+                for (uint fakeId = 1; fakeId <= 10000; fakeId++)
+                {
+                    CuiHelper.DestroyUi(player, GetBuyUiName(fakeId, player.userID));
+                    CuiHelper.DestroyUi(player, GetMysteryGuiName(fakeId, player.userID));
+                    CuiHelper.DestroyUi(player, GetCountdownUiName(fakeId, player.userID));
+                }
+                
+                // Reset tracking for this player
+                _playerVisibleBox[player.userID] = 0;
+                _playerCountdownBox[player.userID] = 0;
+            });
+        }
+
         private void LoadData()
         {
             try
